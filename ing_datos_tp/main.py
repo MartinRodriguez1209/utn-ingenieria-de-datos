@@ -7,7 +7,13 @@ from deltalake import DeltaTable
 
 from incremental import extraer_aproximaciones
 from full import extraer_metadatos
-from silver import transformar_aproximaciones, transformar_metadatos, validar_integridad
+from silver import (
+    transformar_aproximaciones,
+    transformar_metadatos,
+    validar_integridad,
+    filtrar_aproximaciones_pendientes,
+    filtrar_metadatos_pendientes,
+)
 from storage import (
     guardar_aproximaciones,
     guardar_metadatos,
@@ -15,6 +21,7 @@ from storage import (
     guardar_metadatos_silver,
     storage_options,
     bronze_dir,
+    silver_dir,
 )
 
 load_dotenv()
@@ -89,12 +96,9 @@ def ejecutar_extraccion_bronze():
 
 def ejecutar_transformacion_silver():
     """
-    lee los datos ya guardados en bronze, aplica las transformaciones de
-    silver, valida la integridad entre ambas tablas, y guarda el resultado
-    en la capa silver. se lee desde bronze en lugar de reusar los dataframes
-    en memoria de la extraccion, para que silver siempre parta del dato
-    persistido (no de una variable de un paso anterior que podria no
-    reflejar lo que realmente quedo guardado)
+    lee de bronze solo los registros que todavia no fueron procesados en
+    silver, aplica las transformaciones, los guarda, y recien al final
+    valida la integridad contra el estado completo y actualizado de silver
     """
     df_aproximaciones_bronze = DeltaTable(
         f"{bronze_dir}/aproximaciones", storage_options=storage_options
@@ -103,16 +107,47 @@ def ejecutar_transformacion_silver():
         f"{bronze_dir}/metadatos", storage_options=storage_options
     ).to_pandas()
 
-    df_aproximaciones_silver = transformar_aproximaciones(df_aproximaciones_bronze)
-    df_metadatos_silver = transformar_metadatos(df_metadatos_bronze)
+    silver_aproximaciones_path = f"{silver_dir}/aproximaciones"
+    silver_metadatos_path = f"{silver_dir}/metadatos"
 
-    validar_integridad(df_aproximaciones_silver, df_metadatos_silver)
+    # filtramos solo lo que todavia no esta en silver, para no reprocesar
+    # todo el historial acumulado en cada corrida
+    df_aproximaciones_pendientes = filtrar_aproximaciones_pendientes(
+        df_aproximaciones_bronze, silver_aproximaciones_path, storage_options
+    )
+    df_metadatos_pendientes = filtrar_metadatos_pendientes(
+        df_metadatos_bronze, silver_metadatos_path, storage_options
+    )
 
-    print("\nguardando datos en minio (silver)...")
-    guardar_aproximaciones_silver(df_aproximaciones_silver)
-    guardar_metadatos_silver(df_metadatos_silver)
+    print(f"aproximaciones pendientes de procesar: {len(df_aproximaciones_pendientes)}")
+    print(f"metadatos pendientes de procesar: {len(df_metadatos_pendientes)}")
+
+    # transformamos y guardamos solo lo nuevo
+    if not df_aproximaciones_pendientes.empty:
+        df_aproximaciones_silver = transformar_aproximaciones(df_aproximaciones_pendientes)
+        guardar_aproximaciones_silver(df_aproximaciones_silver)
+
+    if not df_metadatos_pendientes.empty:
+        df_metadatos_silver = transformar_metadatos(df_metadatos_pendientes)
+        guardar_metadatos_silver(df_metadatos_silver)
+
+    if df_aproximaciones_pendientes.empty and df_metadatos_pendientes.empty:
+        print("no hay datos nuevos para procesar en silver.")
+
+    # la validacion de integridad se hace al final, leyendo silver completo
+    # ya actualizado (no solo lo nuevo de esta corrida), para que sea un
+    # chequeo real del estado completo del dataset
+    print("\nvalidando integridad de silver...")
+    df_aproximaciones_silver_completo = DeltaTable(
+        silver_aproximaciones_path, storage_options=storage_options
+    ).to_pandas()
+    df_metadatos_silver_completo = DeltaTable(
+        silver_metadatos_path, storage_options=storage_options
+    ).to_pandas()
+
+    validar_integridad(df_aproximaciones_silver_completo, df_metadatos_silver_completo)
+
     print("almacenamiento en silver completado.")
-
 
 if __name__ == "__main__":
     ejecutar_extraccion_bronze()

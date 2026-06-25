@@ -1,5 +1,6 @@
 import pandas as pd
-
+from deltalake import DeltaTable, write_deltalake
+from deltalake.exceptions import TableNotFoundError
 
 def transformar_aproximaciones(df):
     """
@@ -115,3 +116,42 @@ def validar_integridad(df_aproximaciones, df_metadatos):
         print(
             "integridad ok: todas las aproximaciones tienen su metadato correspondiente"
         )
+
+def filtrar_metadatos_pendientes(df_bronze, silver_path, storage_options):
+    """
+    compara los ids que ya existen en silver contra los que hay en bronze,
+    y devuelve solo las filas que todavia no se transformaron. esto evita
+    reprocesar todo el historial acumulado de bronze en cada corrida, sin
+    asumir que el script se ejecuta semana a semana sin saltos
+    """
+    try:
+        df_silver = DeltaTable(silver_path, storage_options=storage_options).to_pandas()
+        ids_ya_procesados = set(df_silver["id"])
+    except TableNotFoundError:
+        ids_ya_procesados = set()
+
+    return df_bronze[~df_bronze["id"].isin(ids_ya_procesados)].copy()
+
+
+def filtrar_aproximaciones_pendientes(df_bronze, silver_path, storage_options):
+    """
+    mismo concepto, pero la clave de comparacion es id + close_approach_date_full,
+    ya que un mismo asteroide puede tener varias aproximaciones (filas) distintas
+    """
+    import pandas as pd
+
+    df_bronze = df_bronze.copy()
+    df_bronze["close_approach_date_full"] = pd.to_datetime(df_bronze["close_approach_date_full"])
+
+    try:
+        df_silver = DeltaTable(silver_path, storage_options=storage_options).to_pandas()
+        claves_procesadas = set(
+            zip(df_silver["id"], pd.to_datetime(df_silver["close_approach_date_full"]))
+        )
+    except TableNotFoundError:
+        claves_procesadas = set()
+
+    claves_bronze = list(zip(df_bronze["id"], df_bronze["close_approach_date_full"]))
+    mascara_pendiente = [clave not in claves_procesadas for clave in claves_bronze]
+
+    return df_bronze[mascara_pendiente]
