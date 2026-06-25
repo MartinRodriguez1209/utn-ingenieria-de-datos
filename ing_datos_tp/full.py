@@ -57,7 +57,7 @@ def extraer_metadatos(ids, api_key):
 
     df = pd.DataFrame(metadatos)
 
-    # Conversión de tipos
+    # conversion de tipos
     df["absolute_magnitude_h"] = df["absolute_magnitude_h"].astype(float)
     df["diameter_min_km"] = df["diameter_min_km"].astype(float)
     df["diameter_max_km"] = df["diameter_max_km"].astype(float)

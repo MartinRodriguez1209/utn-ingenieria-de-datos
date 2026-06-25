@@ -34,7 +34,7 @@ def extraer_aproximaciones(data):
 
     df = pd.DataFrame(aproximaciones)
 
-    # Conversión de tipos de datos
+    # conversion de tipos de datos
     df["close_approach_date"] = pd.to_datetime(df["close_approach_date"])
     df["close_approach_date_full"] = pd.to_datetime(df["close_approach_date_full"])
     df["relative_velocity_km_per_second"] = df[
