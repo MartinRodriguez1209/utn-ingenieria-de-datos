@@ -2,6 +2,7 @@ import pandas as pd
 from deltalake import DeltaTable, write_deltalake
 from deltalake.exceptions import TableNotFoundError
 
+
 def transformar_aproximaciones(df):
     """
     aplica las transformaciones de la capa silver al dataframe de aproximaciones.
@@ -51,44 +52,28 @@ def transformar_metadatos(df):
     """
     df = df.copy()
 
-    # mismo motivo que en aproximaciones: se vuelve a castear por las dudas,
-    # no se confia en que bronze haya conservado los tipos correctos
     df["absolute_magnitude_h"] = df["absolute_magnitude_h"].astype(float)
     df["diameter_min_km"] = df["diameter_min_km"].astype(float)
     df["diameter_max_km"] = df["diameter_max_km"].astype(float)
     df["is_potentially_hazardous"] = df["is_potentially_hazardous"].astype(bool)
     df["is_sentry_object"] = df["is_sentry_object"].astype(bool)
-
-    # se unifica a int64 para que el join con aproximaciones funcione bien
     df["id"] = df["id"].astype("int64")
 
-    # nasa_jpl_url es 100% derivable a partir de id (siempre el mismo patron:
-    # base fija + id, ya verificado contra los datos reales). se elimina para
-    # evitar redundancia, se puede reconstruir cuando haga falta con:
-    # "https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=" + str(id)
     df = df.drop(columns=["nasa_jpl_url"])
 
-    # el nombre del asteroide mezcla dos formatos: con designacion numerica
-    # oficial ("470310 (2007 lb15)") y sin ella ("(2015 ng13)"). el numero,
-    # cuando existe, indica que el asteroide ya tiene una orbita confirmada
-    # y catalogada oficialmente. se extrae a su propia columna y se deja
-    # nulo cuando no aplica (caso real de nulo, no forzado)
+    # el nombre del asteroide mezcla dos componentes reales: el numero de
+    # designacion oficial (cuando existe, indica orbita confirmada y
+    # catalogada) y la designacion provisional (year + codigo, siempre
+    # presente, entre parentesis). se extraen ambas partes a columnas
+    # propias para no perder informacion, y name queda 100% reconstruible
+    # a partir de ellas (verificado contra los datos reales), por lo que
+    # se elimina para evitar la redundancia parcial que tenia
     df["numero_oficial"] = df["name"].str.extract(r"^(\d+)\s")
-
-    # columna booleana derivada de la misma logica, util para filtrar sin
-    # tener que repetir el parseo del string cada vez
+    df["designacion_provisional"] = df["name"].str.extract(r"\((.+)\)")
     df["tiene_designacion_oficial"] = df["name"].str.match(r"^\d+\s")
+    df = df.drop(columns=["name"])
 
-    # cuantifica la incertidumbre en la estimacion del diametro: la nasa no
-    # mide el tamaño exacto, solo da un rango. se usa el delta absoluto en
-    # km porque mantiene la misma unidad que el resto de las columnas de
-    # tamaño y no se distorsiona cuando diameter_min_km es muy chico
     df["incertidumbre_diametro_km"] = df["diameter_max_km"] - df["diameter_min_km"]
-
-    # is_potentially_hazardous (tamaño/orbita) e is_sentry_object (monitoreo
-    # activo de probabilidad de impacto) son criterios distintos y
-    # complementarios de riesgo. se combinan con or para identificar
-    # asteroides bajo algun tipo de seguimiento, sea cual sea el motivo
     df["bajo_seguimiento_riesgo"] = (
         df["is_potentially_hazardous"] | df["is_sentry_object"]
     )
@@ -117,20 +102,24 @@ def validar_integridad(df_aproximaciones, df_metadatos):
             "integridad ok: todas las aproximaciones tienen su metadato correspondiente"
         )
 
+
 def filtrar_metadatos_pendientes(df_bronze, silver_path, storage_options):
     """
     compara los ids que ya existen en silver contra los que hay en bronze,
-    y devuelve solo las filas que todavia no se transformaron. esto evita
-    reprocesar todo el historial acumulado de bronze en cada corrida, sin
-    asumir que el script se ejecuta semana a semana sin saltos
+    y devuelve solo las filas que todavia no se transformaron. se castea
+    el id de bronze a int64 antes de comparar, porque en bronze sigue
+    siendo string (recien se castea a int64 en la transformacion de silver)
     """
+    df_bronze = df_bronze.copy()
+    df_bronze["id"] = df_bronze["id"].astype("int64")
+
     try:
         df_silver = DeltaTable(silver_path, storage_options=storage_options).to_pandas()
         ids_ya_procesados = set(df_silver["id"])
     except TableNotFoundError:
         ids_ya_procesados = set()
 
-    return df_bronze[~df_bronze["id"].isin(ids_ya_procesados)].copy()
+    return df_bronze[~df_bronze["id"].isin(ids_ya_procesados)]
 
 
 def filtrar_aproximaciones_pendientes(df_bronze, silver_path, storage_options):
@@ -141,8 +130,10 @@ def filtrar_aproximaciones_pendientes(df_bronze, silver_path, storage_options):
     import pandas as pd
 
     df_bronze = df_bronze.copy()
-    df_bronze["close_approach_date_full"] = pd.to_datetime(df_bronze["close_approach_date_full"])
-
+    df_bronze["id"] = df_bronze["id"].astype("int64")
+    df_bronze["close_approach_date_full"] = pd.to_datetime(
+        df_bronze["close_approach_date_full"]
+    )
     try:
         df_silver = DeltaTable(silver_path, storage_options=storage_options).to_pandas()
         claves_procesadas = set(

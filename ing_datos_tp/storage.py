@@ -19,15 +19,18 @@ storage_options = {
 BUCKET = os.getenv("MINIO_BUCKET")
 bronze_dir = f"s3://{BUCKET}/bronze"
 silver_dir = f"s3://{BUCKET}/silver"
+gold_dir = f"s3://{BUCKET}/gold"
 
 
 def save_data_as_delta(
-    df, path, storage_options, mode="overwrite", partition_cols=None
+    df, path, storage_options, mode="overwrite", partition_cols=None, schema_mode=None
 ):
     """
     Guarda un DataFrame en formato Delta Lake en la ruta especificada.
     Soporta particionado por una o varias columnas.
-    Por defecto el modo es overwrite.
+    Por defecto el modo es overwrite. schema_mode permite especificar
+    "overwrite" cuando el esquema del dataframe cambio respecto al existente
+    (por ejemplo, se agrego una columna nueva).
     """
     write_deltalake(
         path,
@@ -35,6 +38,7 @@ def save_data_as_delta(
         mode=mode,
         storage_options=storage_options,
         partition_by=partition_cols,
+        schema_mode=schema_mode,
     )
 
 
@@ -147,3 +151,18 @@ def guardar_metadatos_silver(df):
         storage_options=storage_options,
     )
     print(f"metadatos guardados en: {path}")
+
+
+def guardar_resumen_diario(df):
+    """
+    guarda el resumen diario en la capa gold. se usa overwrite y no merge:
+    a diferencia de bronze/silver, esta tabla es un recalculo completo sobre
+    todo silver en cada corrida, no un acumulado de eventos nuevos. si datos
+    historicos cambian (por ejemplo al corregirse huerfanos), el resumen de
+    esa fecha debe reflejarlo, lo cual un merge solo-insert no permitiria
+    """
+    path = f"{gold_dir}/resumen_diario"
+
+    print("guardando resumen diario en gold...")
+    save_data_as_delta(df, path, storage_options=storage_options, mode="overwrite")
+    print(f"resumen diario guardado en: {path}")

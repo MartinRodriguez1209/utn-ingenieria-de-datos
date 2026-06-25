@@ -14,6 +14,7 @@ from silver import (
     filtrar_aproximaciones_pendientes,
     filtrar_metadatos_pendientes,
 )
+from gold import calcular_resumen_diario
 from storage import (
     guardar_aproximaciones,
     guardar_metadatos,
@@ -22,6 +23,8 @@ from storage import (
     storage_options,
     bronze_dir,
     silver_dir,
+    guardar_resumen_diario,
+    gold_dir,
 )
 
 load_dotenv()
@@ -124,7 +127,9 @@ def ejecutar_transformacion_silver():
 
     # transformamos y guardamos solo lo nuevo
     if not df_aproximaciones_pendientes.empty:
-        df_aproximaciones_silver = transformar_aproximaciones(df_aproximaciones_pendientes)
+        df_aproximaciones_silver = transformar_aproximaciones(
+            df_aproximaciones_pendientes
+        )
         guardar_aproximaciones_silver(df_aproximaciones_silver)
 
     if not df_metadatos_pendientes.empty:
@@ -149,6 +154,31 @@ def ejecutar_transformacion_silver():
 
     print("almacenamiento en silver completado.")
 
+
+def ejecutar_agregacion_gold():
+    """
+    lee silver completo (ya actualizado), calcula el resumen diario y lo
+    guarda en gold. se relee silver en vez de reusar variables en memoria,
+    por el mismo motivo que silver relee bronze: garantizar que se parte
+    de lo que realmente quedo persistido
+    """
+    df_aproximaciones_silver = DeltaTable(
+        f"{silver_dir}/aproximaciones", storage_options=storage_options
+    ).to_pandas()
+    df_metadatos_silver = DeltaTable(
+        f"{silver_dir}/metadatos", storage_options=storage_options
+    ).to_pandas()
+
+    df_resumen_diario = calcular_resumen_diario(
+        df_aproximaciones_silver, df_metadatos_silver
+    )
+
+    print("\nguardando datos en minio (gold)...")
+    guardar_resumen_diario(df_resumen_diario)
+    print("almacenamiento en gold completado.")
+
+
 if __name__ == "__main__":
     ejecutar_extraccion_bronze()
     ejecutar_transformacion_silver()
+    ejecutar_agregacion_gold()
