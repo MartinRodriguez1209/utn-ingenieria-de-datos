@@ -17,9 +17,10 @@ storage_options = {
     "aws_s3_allow_unsafe_rename": "true",
 }
 bucket = os.getenv("MINIO_BUCKET")
-bronze_dir = f"s3://{bucket}/bronze"
-silver_dir = f"s3://{bucket}/silver"
-gold_dir = f"s3://{bucket}/gold"
+fuente = "nasa_neows"
+bronze_dir = f"s3://{bucket}/bronze/{fuente}"
+silver_dir = f"s3://{bucket}/silver/{fuente}"
+gold_dir = f"s3://{bucket}/gold/{fuente}"
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)

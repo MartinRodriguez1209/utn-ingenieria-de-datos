@@ -17,9 +17,11 @@ storage_options = {
 
 # Directorio base bronze
 BUCKET = os.getenv("MINIO_BUCKET")
-bronze_dir = f"s3://{BUCKET}/bronze"
-silver_dir = f"s3://{BUCKET}/silver"
-gold_dir = f"s3://{BUCKET}/gold"
+FUENTE = "nasa_neows"
+
+bronze_dir = f"s3://{BUCKET}/bronze/{FUENTE}"
+silver_dir = f"s3://{BUCKET}/silver/{FUENTE}"
+gold_dir = f"s3://{BUCKET}/gold/{FUENTE}"
 
 
 def save_data_as_delta(

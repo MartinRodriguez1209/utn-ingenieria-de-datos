@@ -1,0 +1,132 @@
+COMENTARIO DE ENTREGA — Trabajo Integrador de Data Engineering
+
+API y fuente de datos
+----------------------
+Para este integrador usé la API pública de la NASA, NeoWs (Near Earth Object Web Service),
+que es gratuita y se accede registrándose en https://api.nasa.gov. Usé dos endpoints:
+
+- /neo/rest/v1/feed: devuelve los asteroides que se aproximaron a la Tierra en un rango de
+  fechas (máximo 7 días por consulta). Lo uso para la extracción incremental, ya que se
+  actualiza todos los días con nuevas aproximaciones.
+- /neo/rest/v1/neo/{id}: devuelve los metadatos completos de un asteroide puntual, dado su
+  id. Lo uso para la extracción full, ya que esos datos (diámetro, magnitud, si es
+  potencialmente peligroso, etc.) no cambian con el tiempo.
+
+El flujo es: primero consulto el feed para los últimos 7 días, extraigo los ids de los
+asteroides que aparecieron, y con esos ids consulto el segundo endpoint para traer sus
+metadatos. El feed se consulta una sola vez por corrida y se reusa para ambas extracciones,
+para no repetir requests innecesarias.
+
+Qué hace el sistema
+----------------------
+El proyecto sigue una arquitectura de tres capas (bronze, silver, gold), todas en formato
+Delta Lake sobre un bucket de MinIO, organizadas bajo una carpeta que identifica la fuente
+de datos (nasa_neows), ya que un lakehouse real suele alojar información de varios sistemas
+distintos:
+
+  bronze/nasa_neows/aproximaciones
+  bronze/nasa_neows/metadatos
+  silver/nasa_neows/aproximaciones
+  silver/nasa_neows/metadatos
+  gold/nasa_neows/resumen_diario
+
+1. Extracción y almacenamiento crudo (bronze)
+   - incremental.py extrae y estructura las aproximaciones a partir de la respuesta del feed.
+   - full.py extrae los metadatos de cada asteroide, con manejo de errores por si la API
+     falla en alguna request puntual (no se cae todo el proceso por un solo error).
+   - storage.py guarda ambos en bronze: aproximaciones con MERGE (insertando solo lo nuevo,
+     evitando duplicados entre corridas) y particionado por fecha; metadatos también con
+     MERGE solo-insert, ya que son estáticos y no deben sobreescribirse.
+
+2. Procesamiento y limpieza (silver)
+   - silver.py lee bronze y aplica las transformaciones, devolviendo dataframes limpios y
+     tipados. Las tareas de transformación que apliqué son:
+       - Verificación de duplicados (no se encontraron, pero se comprobó explícitamente).
+       - Manejo de nulos reales: al extraer el número de designación oficial de un
+         asteroide, los que todavía no tienen ese número quedan con nulo, lo cual es
+         información correcta, no un error de carga.
+       - Conversión de tipos: id a int64 en ambas tablas (para que el join funcione),
+         orbiting_body a category (siempre es "Earth", es una categoría fija).
+       - Formateo de fecha: se descompone el timestamp completo de aproximación en columnas
+         separadas de fecha y hora, eliminando la columna redundante que solo tenía el día
+         sin la hora.
+       - Columnas nuevas con lógica: extracción del número de designación oficial y de la
+         designación provisional a partir del nombre del asteroide (que antes mezclaba
+         ambas cosas en un solo string), un booleano que indica si tiene designación
+         oficial, la incertidumbre de la estimación del diámetro (diferencia entre el
+         diámetro máximo y mínimo estimados), y una bandera que combina los dos criterios
+         de riesgo de la NASA (potencialmente peligroso y objeto en seguimiento Sentry).
+       - Eliminación de columnas redundantes: la URL de detalle del asteroide se puede
+         reconstruir 100% a partir del id (verificado contra los datos reales antes de
+         eliminarla), y el nombre completo del asteroide quedó totalmente reemplazado por
+         las columnas derivadas explicadas arriba.
+       - JOIN entre aproximaciones y metadatos, usado como validación de integridad: avisa
+         si alguna aproximación quedó sin su metadato correspondiente.
+   - Antes de transformar, silver.py compara qué ids ya están guardados en silver contra lo
+     que hay en bronze, y solo procesa lo que falta. Esto evita reprocesar todo el historial
+     acumulado en cada corrida, algo que en la entrega anterior no estaba implementado.
+
+3. Agregación final (gold)
+   - gold.py cruza aproximaciones con metadatos (con un join) y agrupa por fecha, calculando
+     cantidad de aproximaciones por día, velocidad promedio y máxima, distancia mínima y
+     promedio, diámetro máximo, y cantidad de asteroides bajo seguimiento de riesgo por día.
+   - Esta tabla se guarda con overwrite completo (no con merge), porque es un recálculo
+     sobre todo silver en cada corrida, no un acumulado de eventos nuevos.
+
+4. Orquestación (main.py)
+   - Coordina las tres etapas en orden: extracción a bronze, transformación a silver,
+     agregación a gold. Cada etapa es una función separada, no un único bloque de código.
+
+Archivos del proyecto
+----------------------
+- main.py: orquesta todo el flujo (extracción, transformación, agregación).
+- incremental.py: extrae y estructura las aproximaciones desde el feed.
+- full.py: extrae los metadatos por id, con manejo de errores.
+- silver.py: transforma aproximaciones y metadatos, y valida integridad entre ambas tablas.
+- gold.py: calcula el resumen diario agregado.
+- storage.py: funciones de guardado en Delta Lake (bronze, silver y gold), y configuración
+  de conexión a MinIO.
+- exploracion.py: script de inspección manual para revisar el contenido de las tres capas
+  (no forma parte del pipeline en sí, es una herramienta de verificación).
+- recuperar.py, reprocesar_silver.py y migrar_data.py: scripts puntuales que usé durante el
+  desarrollo, explicados en la sección de decisiones más abajo.
+
+Decisiones y mejoras respecto a la entrega anterior
+----------------------------------------------------
+En la entrega parcial anterior recibí 20 sobre 30 puntos en extracción full e incremental,
+con la observación de que faltaba un manejo más eficiente de recursos. Identifiqué que el
+problema era que cada corrida de main.py releía todo el historial acumulado de bronze para
+volver a transformarlo en silver, sin distinguir qué ya estaba procesado. En esta entrega
+agregué un filtro que compara los datos de bronze contra lo que ya existe en silver, y solo
+procesa lo que es nuevo, evitando ese reprocesamiento innecesario.
+
+También recibí el comentario de que, dentro de bronze, faltaba una carpeta que identifique
+la fuente de datos, ya que un lakehouse aloja información de varios sistemas distintos. Lo
+corregí agregando un nivel de carpeta (nasa_neows) en bronze, silver y gold, y migré los
+datos que ya tenía guardados a la nueva estructura sin perder el historial acumulado.
+
+Durante el desarrollo de esta entrega encontré además un bug real en el código de la entrega
+anterior: la función que guardaba los metadatos usaba "overwrite" en lugar de un merge, lo
+que hacía que cada corrida borrara los metadatos de asteroides que no aparecían en el feed
+de esa semana en particular, aunque sus aproximaciones siguieran guardadas. Corregí la
+función para que use merge (solo inserta lo que falta, sin borrar lo existente), y recuperé
+puntualmente los metadatos que se habían perdido en corridas anteriores con un script aparte
+(recuperar.py), antes de reprocesar todo el historial de silver con la lógica de
+transformación actualizada (reprocesar_silver.py, necesario porque agregué columnas nuevas
+y el filtro de "solo lo pendiente" no las aplicaría a datos ya guardados con la versión
+anterior de la lógica).
+
+Cómo ejecutar el proyecto
+----------------------------
+El proyecto necesita un archivo .env en la raíz, con las siguientes variables:
+
+  NASA_API_KEY=tu_api_key
+  MINIO_ENDPOINT=http://31.97.241.212:9002
+  MINIO_ACCESS_KEY=alumno46
+  MINIO_SECRET_KEY=alumno46
+  MINIO_BUCKET=alumno46
+
+La api key de la NASA se obtiene gratis en https://api.nasa.gov. Para correr el pipeline
+completo alcanza con ejecutar main.py; los demás scripts (recuperar.py, reprocesar_silver.py,
+migrar_data.py, exploracion.py) fueron herramientas puntuales usadas durante el desarrollo
+y no son necesarios para una ejecución normal.
